@@ -125,6 +125,11 @@ def get_ea_name(ea, fromaddr=idc.BADADDR, true=False, user=False):
     Returns:
         The name of the address or "".
     """
+    if WORD_SIZE == 4:
+        s = idc.SegName(ea).lower()
+        if 'text' in s or 'stub' in s:
+            ea &= ~1
+
     if user and not idc.hasUserName(idc.GetFlags(ea)):
         return ""
     if true:
