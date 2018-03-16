@@ -17,7 +17,14 @@ _log = idau.make_log(0, __name__)
 
 def find_kernel_base():
     """Find the kernel base."""
-    return idaapi.get_fileregion_ea(0)
+    kbase = idaapi.get_fileregion_ea(0)
+
+    if kbase == idc.BADADDR:
+        # sometimes kernelcache is a FAT Mach-O with one arch
+        # sizeof(fat_header) + 1 * sizeof(fat_arch) = 28
+        kbase = idaapi.get_fileregion_ea(28)
+
+    return kbase
 
 base = find_kernel_base()
 """The kernel base address (the address of the main kernel Mach-O header)."""
