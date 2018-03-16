@@ -364,7 +364,7 @@ def _collect_metaclasses():
         metaclass_to_meta_superclass[metaclass] = meta_superclass
     for ea in idautils.Segments():
         segname = idc.SegName(ea)
-        if not segname.endswith(_CONST_SEGNAME + '__mod_init_func'):
+        if not segname.endswith(_CONST_SEGNAME + '.__mod_init_func'):
             continue
         _log(2, 'Processing segment {}', segname)
         _process_mod_init_func_section_for_metaclasses(ea, found_metaclass)

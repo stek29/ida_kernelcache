@@ -153,6 +153,8 @@ def set_ea_name(ea, name, rename=False, auto=False):
     Returns:
         True if the address was successfully named (or renamed).
     """
+    if WORD_SIZE == 4:
+        ea &= ~1
     if not rename and idc.hasUserName(idc.GetFlags(ea)):
         return get_ea_name(ea) == name
     flags = idc.SN_CHECK
