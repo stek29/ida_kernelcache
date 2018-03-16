@@ -13,12 +13,24 @@ import kernel
 
 _log = idau.make_log(0, __name__)
 
-idc.Til2Idb(-1, 'mach_header_64')
-idc.Til2Idb(-1, 'load_command')
-idc.Til2Idb(-1, 'segment_command_64')
-idc.Til2Idb(-1, 'section_64')
 
-_LC_SEGMENT_64 = 0x19
+_LOAD_COMMAND = 'load_command'
+
+if idau.WORD_SIZE == 4:
+    _MACH_HEADER = 'mach_header'
+    _SEGMENT_COMMAND = 'segment_command'
+    _SECTION = 'section'
+    _LC_SEGMENT = 0x1
+else: # idau.WORD_SIZE == 8
+    _MACH_HEADER = 'mach_header_64'
+    _SEGMENT_COMMAND = 'segment_command_64'
+    _SECTION = 'section_64'
+    _LC_SEGMENT = 0x19
+
+idc.Til2Idb(-1, _MACH_HEADER)
+idc.Til2Idb(-1, _LOAD_COMMAND)
+idc.Til2Idb(-1, _SEGMENT_COMMAND)
+idc.Til2Idb(-1, _SECTION)
 
 def _macho_segments_and_sections(ea):
     """A generator to iterate through a Mach-O file's segments and sections.
@@ -26,21 +38,21 @@ def _macho_segments_and_sections(ea):
     Each iteration yields a tuple:
         (segname, segstart, segend, [(sectname, sectstart, sectend), ...])
     """
-    hdr   = idau.read_struct(ea, 'mach_header_64', asobject=True)
+    hdr   = idau.read_struct(ea, _MACH_HEADER, asobject=True)
     nlc   = hdr.ncmds
     lc    = int(hdr) + len(hdr)
     lcend = lc + hdr.sizeofcmds
     while lc < lcend and nlc > 0:
-        loadcmd = idau.read_struct(lc, 'load_command', asobject=True)
-        if loadcmd.cmd == _LC_SEGMENT_64:
-            segcmd = idau.read_struct(lc, 'segment_command_64', asobject=True)
+        loadcmd = idau.read_struct(lc, _LOAD_COMMAND, asobject=True)
+        if loadcmd.cmd == _LC_SEGMENT:
+            segcmd = idau.read_struct(lc, _SEGMENT_COMMAND, asobject=True)
             segname  = idau.null_terminated(segcmd.segname)
             segstart = segcmd.vmaddr
             segend   = segstart + segcmd.vmsize
             sects    = []
             sc  = int(segcmd) + len(segcmd)
             for i in range(segcmd.nsects):
-                sect = idau.read_struct(sc, 'section_64', asobject=True)
+                sect = idau.read_struct(sc, _SECTION, asobject=True)
                 sectname  = idau.null_terminated(sect.sectname)
                 sectstart = sect.addr
                 sectend   = sectstart + sect.size
