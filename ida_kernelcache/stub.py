@@ -43,6 +43,9 @@ def _process_stub_template_1(stub):
     LDR  X<reg>, [X<reg>, #<offset>@PAGEOFF]
     BR   X<reg>
     """
+    if idau.WORD_SIZE != 8:
+        return None
+
     adrp, ldr, br = idau.Instructions(stub, count=3)
     if (adrp.itype == idaapi.ARM_adrp and adrp.Op1.type == idaapi.o_reg
             and adrp.Op2.type == idaapi.o_imm
@@ -55,8 +58,35 @@ def _process_stub_template_1(stub):
         if target and idau.is_mapped(target):
             return target
 
+def _process_stub_template_2(stub):
+    """A template to match the following stub pattern:
+
+    MOV             R<regx>, #(<offset> - PC + 2)
+    ADD             R<regx>, PC
+    LDR.W           R<regy>, [<regx>]
+    BX              R<regy>
+    """
+    if idau.WORD_SIZE != 4:
+        return None
+
+    movl, add, ldr, bx = idau.Instructions(stub, count=4)
+    if (movl.itype == idaapi.ARM_movl and movl.Op1.type == idaapi.o_reg
+            and movl.Op2.type == idaapi.o_imm
+            and add.itype == idaapi.ARM_add and add.Op1.type == idaapi.o_reg
+            and add.Op2.type == idaapi.o_reg and add.Op2.reg == 15 # PC
+            and ldr.itype == idaapi.ARM_ldr and ldr.Op2.type == idaapi.o_displ
+            and bx.itype == idaapi.ARM_bx and bx.Op1.type == idaapi.o_reg
+            and movl.Op1.reg == add.Op1.reg == ldr.Op2.reg
+            and ldr.Op1.reg == bx.Op1.reg):
+        offset = movl.Op2.value + add.ea + 4 # +4 because fuck arm 32
+        target = idau.read_word(offset)
+        if target and idau.is_mapped(target):
+            return target & ~1
+
+
 _stub_processors = (
     _process_stub_template_1,
+    _process_stub_template_2,
 )
 
 def stub_target(stub_func):
@@ -142,6 +172,8 @@ def _process_stubs_section(segstart, make_thunk, next_stub):
         if idc.isRef(idc.GetFlags(ea)) and not stub_name_target(idau.get_ea_name(ea)):
             _process_possible_stub(ea, make_thunk, next_stub)
 
+STUB_SECT_POSTFIX = '__stubs' if idau.WORD_SIZE == 8 else '__stub'
+
 def initialize_stub_symbols(make_thunk=True):
     """Populate IDA with information about the stubs in an iOS kernelcache.
 
@@ -156,7 +188,7 @@ def initialize_stub_symbols(make_thunk=True):
     next_stub = internal.make_name_generator(kernelcache_stub_suffix)
     for ea in idautils.Segments():
         segname = idc.SegName(ea)
-        if not segname.endswith('__stubs'):
+        if not segname.endswith(STUB_SECT_POSTFIX):
             continue
         _log(3, 'Processing segment {}', segname)
         _process_stubs_section(ea, make_thunk, next_stub)
