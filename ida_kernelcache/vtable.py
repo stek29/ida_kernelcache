@@ -93,13 +93,32 @@ def vtable_length(ea, end=None, scan=False):
                 return return_value(False, zeros)
         # We can skip all but the last VTABLE_OFFSET zeros.
         return return_value(False, zeros - VTABLE_OFFSET)
-    # TODO: We should verify that all vtable entries refer to code.
     # Now we know that we have at least one nonzero value, our job is easier. Get the full length
     # of the vtable, including the first VTABLE_OFFSET entries and the subsequent nonzero entries,
     # until either we find a zero word (not included) or run out of words in the stream.
-    length = VTABLE_OFFSET + 1 + idau.iterlen(takewhile(lambda word: word != 0, words))
-    # Now it's simple: We are valid if the length is long enough, invalid if it's too short.
-    return return_value(length >= MIN_VTABLE_LENGTH, length)
+    funcs = list(takewhile(lambda word: word != 0, words))
+    length = VTABLE_OFFSET + 1 + len(funcs)
+
+    # There's no need to check if found funcs refer to code if they're
+    # too short
+
+    if length < MIN_VTABLE_LENGTH:
+        return return_value(False, length)
+
+    # We need to fill funcs with nonzero values, and only then check all
+    # values and fail if they don't refer to code -- so we can skip
+    # sequences like "code data zero", which are obviously invalid
+    for f in [first] + funcs:
+        # For some reason checking for perms on segment didn't work
+        # properly for me (it always returned 0), so I decieded to check
+        # segment names instead and see if they contain "text" or "stub"
+        s = idc.SegName(f).lower()
+        if 'text' not in s and 'stub' not in s:
+            _log(5, "element in vtable at {:#x} isn't from __text or __stub but rather from {}", ea, s)
+            return return_value(False, length)
+
+    # If we're still there then vtable is valid
+    return return_value(True, length)
 
 def convert_vtable_to_offsets(vtable, length=None):
     """Convert a vtable into a sequence of offsets.
