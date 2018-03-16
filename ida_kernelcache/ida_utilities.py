@@ -467,6 +467,9 @@ def is_function_start(ea):
 
 def force_function(addr):
     """Ensure that the given address is a function type, converting it if necessary."""
+    # Unset last bin -- so it works with THUMB functions too
+    # TODO: Consider setting THUMB/ARM mode too
+    addr &= ~1
     if is_function_start(addr):
         return True
     return _convert_address_to_function(addr)
