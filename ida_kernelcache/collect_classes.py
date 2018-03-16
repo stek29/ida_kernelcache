@@ -24,8 +24,15 @@ _MEMOP_POSTINDEX = 0x80
 
 _MEMOP_WBINDEX   = _MEMOP_PREINDEX | _MEMOP_POSTINDEX
 
+# on 64bit devices __DATA_CONST segment is used for constant data
+# instead of __DATA (eg __DATA_CONST.__const instead of __DATA.__const)
+if idau.WORD_SIZE == 4:
+    _CONST_SEGNAME = '__DATA'
+else:
+    _CONST_SEGNAME = '__DATA_CONST'
+
 class _Regs(object):
-    """A set of registers for _emulate_arm64."""
+    """A set of registers for _emulate_arm64/32."""
 
     class _Unknown:
         """A wrapper class indicating that the value is unknown."""
@@ -54,6 +61,11 @@ class _Regs(object):
     def _reg(self, reg):
         if isinstance(reg, (int, long)):
             reg = _Regs._reg_names[reg]
+
+        # Automatically map Rn to Xn
+        if reg[0] == 'R' and reg[1:].isdigit():
+            reg = 'X' + reg[1:]
+
         return reg
 
     def __getitem__(self, reg):
@@ -68,7 +80,7 @@ class _Regs(object):
         else:
             self._regs[self._reg(reg)] = value & 0xffffffffffffffff
 
-def _emulate_arm64(start, end, on_BL=None, on_RET=None):
+def _emulate_arm64(start, end=None, count=None, on_BL=None, on_RET=None):
     """A very basic partial Arm64 emulator that does just enough to find OSMetaClass
     information."""
     # Super basic emulation.
@@ -86,8 +98,7 @@ def _emulate_arm64(start, end, on_BL=None, on_RET=None):
     def cleartemps():
         for t in ['X{}'.format(i) for i in range(0, 19)]:
             reg.clear(t)
-    for insn in idau.Instructions(start, end):
-        _log(11, 'Processing instruction {:#x}', insn.ea)
+    for insn in idau.Instructions(start, end=end, count=count):
         mnem = insn.get_canon_mnem()
         if mnem == 'ADRP' or mnem == 'ADR':
             reg[insn.Op1.reg] = insn.Op2.value
@@ -122,6 +133,167 @@ def _emulate_arm64(start, end, on_BL=None, on_RET=None):
         else:
             _log(10, 'Unrecognized instruction at address {:#x}', insn.ea)
             reg.clearall()
+
+def _emulate_arm32(start, end=None, count=None, on_BL=None, on_RET=None):
+    """A very basic partial Arm32 emulator that does just enough to find OSMetaClass
+    information."""
+    # Super basic emulation.
+    reg = _Regs()
+    def load(addr, dtyp):
+        if not addr:
+            return None
+        if dtyp == idaapi.dt_dword:
+            size = 4
+        else:
+            return None
+        return idau.read_word(addr, size)
+    def cleartemps():
+        for t in ['R{}'.format(i) for i in range(0, 12)]:
+            reg.clear(t)
+
+    # Handle thumb stuff
+    start = start & ~1
+    if end is not None:
+        end = (end + 1) & ~1
+
+    # if bl is found, lr is replaced, and marked dirty
+    # if pop {... lr ...} is found, lr is assumed to be restored to
+    # original, "clean" state
+    lr_dirty = False
+
+    # Special registers have special handling
+    _SP_REG = 13
+    _LR_REG = 14
+    _PC_REG = 15
+
+    for insn in idau.Instructions(start, end=end, count=count):
+        mnem = insn.get_canon_mnem()
+        _log(12, 'Regs: {}', reg._regs)
+        _log(11, 'Processing instruction {} at {:#x}', mnem, insn.ea)
+        if mnem == 'ADR':
+            reg[insn.Op1.reg] = insn.Op2.value
+        elif ((mnem == 'ADD' or mnem == 'SUB')
+                and insn.Op1.type == insn.Op2.type == idc.o_reg
+                and insn.Op1.reg == insn.Op2.reg == _SP_REG):
+            # ignore add/sub on on SP
+            pass
+        elif mnem in ('ADD', 'ORR', 'SUB') and insn.Op2.type == idc.o_reg and insn.Op3.type == idc.o_imm:
+            # There might be more operations, but in practice
+            # add/sub/orr are enough
+
+            # Don't bother checking if src register is unknown and
+            # just mark dst register as unknown too
+            if isinstance(reg[insn.Op2.reg], _Regs._Unknown):
+                reg.clear(insn.Op1.reg)
+            else:
+                tmp = reg[insn.Op2.reg]
+                if mnem == 'ADD':
+                    tmp += insn.Op3.value
+                elif mnem == 'SUB':
+                    tmp -= insn.Op3.value
+                elif mnem == 'ORR':
+                    tmp |= insn.Op3.value
+                else:
+                    pass
+                reg[insn.Op1.reg] = tmp
+        elif mnem == 'ADD' and insn.Op3.type == idaapi.o_void:
+            # Don't bother checking if it's unknown
+            if not isinstance(reg[insn.Op1.reg], _Regs._Unknown):
+                if insn.Op2.type == idc.o_imm:
+                    # ADD Rx, <imm>
+                    reg[insn.Op1.reg] = reg[insn.Op1.reg] + insn.Op2.value
+                elif insn.Op2.type == idc.o_reg and insn.Op2.reg == _PC_REG:
+                    # ADD Rx, PC -- special handling
+                    # On ARM PC is "address of current instruction + 4"
+                    # for historical reasons
+                    reg[insn.Op1.reg] = reg[insn.Op1.reg] + insn.ea + 4
+        elif mnem == 'NOP':
+            pass
+        elif mnem == 'MOV' and insn.Op2.type == idc.o_imm:
+            reg[insn.Op1.reg] = insn.Op2.value
+        elif mnem == 'MOV' and insn.Op2.type == idc.o_reg:
+            reg[insn.Op1.reg] = reg[insn.Op2.reg]
+        elif mnem == 'BX' and insn.Op1.type == idc.o_reg and insn.Op1.reg == _LR_REG:
+            # bx lr is often used for ret
+            if on_RET:
+                on_RET(reg)
+            break
+        elif mnem == 'POP' and insn.Op1.type in (idc.o_idpspec1, idc.o_reg):
+            poped = []
+
+            # Either it's one register pop'ped
+            if insn.Op1.type == idc.o_reg:
+                poped.append(insn.Op1.reg)
+
+            # Or whole set of them, identified by specval bits
+            if insn.Op1.type == idc.o_idpspec1:
+                for i in range(0, 16):
+                    if insn.Op1.specval & (1<<i):
+                        poped.append(i)
+
+            for i in poped:
+                reg.clear(i)
+
+            if _PC_REG in poped:
+                # pop {...pc...} is another way for ret
+                if on_RET:
+                    on_RET(reg)
+                break
+            elif _LR_REG in poped:
+                lr_dirty = False
+        elif mnem == 'BL' and insn.Op1.type == idc.o_near:
+            if on_BL:
+                on_BL(insn.Op1.addr, reg)
+            cleartemps()
+            lr_dirty = True
+        elif (mnem == 'B' and insn.Op1.type == idc.o_near) or (mnem in ('CBZ', 'CBNZ') and insn.Op2.type == idc.o_near):
+            dest = insn.Op1.addr if insn.Op2.type == 0 else insn.Op2.addr
+            if start <= dest <= end:
+                # silently ignoring branch since start<=dest<=end
+                # So we check all code not skipping anything because of
+                # conditions, and also don't get stuck in a loop
+                continue
+
+            if not lr_dirty:
+                # special case -- when first instruction is branch to
+                # another place -- means that current function is stub
+                if insn.ea == start:
+                    _log(11, 'Following {} at {:#x} (to {:#x})', mnem, insn.ea, dest)
+                    _emulate_arm(dest, idc.FindFuncEnd(dest), on_BL=on_BL, on_RET=on_RET, reg=reg)
+                elif on_RET:
+                    # Consider as bl & ret -- usually happens as a way
+                    # of optimization, when return func2() in the end of
+                    # func1 is replaced by "b _func2"
+                    if on_BL:
+                        on_BL(dest, reg)
+                        cleartemps()
+                    if on_RET:
+                        on_RET(reg)
+            else:
+                _log(11, 'NOT Following {} at {:#x} (to {:#x}) and not considering as ret', mnem, insn.ea, dest)
+            break
+        elif mnem == 'LDR' and insn.Op2.type == idc.o_mem:
+            # LDR Rx, =ADDR
+            reg[insn.Op1.reg] = load(insn.Op2.addr, insn.Op1.dtype)
+        elif mnem == 'LDR' and insn.Op2.type == idc.o_displ and insn.Op2.value == 0:
+            # LDR Rx, [Ry]
+            reg[insn.Op1.reg] = load(reg[insn.Op2.reg], insn.Op1.dtype)
+        elif mnem == 'PUSH' or mnem == 'STR':
+            # They don't affect registers directly
+            pass
+        else:
+            # silently clear on V instructions -- they're used pretty
+            # often but aren't needed for OSMetaClass stuff
+            if mnem not in ('VMOV', 'VST1', 'VLD1'):
+                _log(6, 'Unrecognized instruction {} at address {:#x}', mnem, insn.ea)
+            reg.clearall()
+
+# Universal function
+if idau.WORD_SIZE == 4:
+    _emulate_arm = _emulate_arm32
+else: # == 8
+    _emulate_arm = _emulate_arm64
+
 
 class _OneToOneMapFactory(object):
     """A factory to extract the largest one-to-one submap."""
@@ -162,7 +334,7 @@ class _OneToOneMapFactory(object):
 
 def _process_mod_init_func_for_metaclasses(func, found_metaclass):
     """Process a function from the __mod_init_func section for OSMetaClass information."""
-    _log(4, 'Processing function {}', idc.GetFunctionName(func))
+    _log(4, 'Processing function {:#x} ({})', func, idc.GetFunctionName(func))
     def on_BL(addr, reg):
         X0, X1, X3 = reg['X0'], reg['X1'], reg['X3']
         if not (X0 and X1 and X3):
@@ -172,7 +344,7 @@ def _process_mod_init_func_for_metaclasses(func, found_metaclass):
         if not idc.SegName(X1).endswith("__TEXT.__cstring") or not idc.SegName(X0):
             return
         found_metaclass(X0, idc.GetString(X1), X3, reg['X2'] or None)
-    _emulate_arm64(func, idc.FindFuncEnd(func), on_BL=on_BL)
+    _emulate_arm(func, idc.FindFuncEnd(func), on_BL=on_BL)
 
 def _process_mod_init_func_section_for_metaclasses(segstart, found_metaclass):
     """Process a __mod_init_func section for OSMetaClass information."""
@@ -192,7 +364,7 @@ def _collect_metaclasses():
         metaclass_to_meta_superclass[metaclass] = meta_superclass
     for ea in idautils.Segments():
         segname = idc.SegName(ea)
-        if not segname.endswith('__DATA_CONST.__mod_init_func'):
+        if not segname.endswith(_CONST_SEGNAME + '__mod_init_func'):
             continue
         _log(2, 'Processing segment {}', segname)
         _process_mod_init_func_section_for_metaclasses(ea, found_metaclass)
@@ -225,8 +397,9 @@ def _get_vtable_metaclass(vtable_addr, metaclass_info):
     def on_RET(reg):
         on_RET.ret = reg['X0']
     on_RET.ret = None
-    _emulate_arm64(getMetaClass, getMetaClass + idau.WORD_SIZE * _MAX_GETMETACLASS_INSNS,
-            on_RET=on_RET)
+
+    # use count to avoid alignment errors on arm32
+    _emulate_arm(getMetaClass, count=_MAX_GETMETACLASS_INSNS, on_RET=on_RET)
     if on_RET.ret in metaclass_info:
         return on_RET.ret
 
@@ -254,7 +427,7 @@ def _collect_vtables(metaclass_info):
             metaclass_to_vtable_builder.add_link(metaclass, vtable)
     for ea in idautils.Segments():
         segname = idc.SegName(ea)
-        if not segname.endswith('__DATA_CONST.__const'):
+        if not segname.endswith(_CONST_SEGNAME + '.__const'):
             continue
         _log(2, 'Processing segment {}', segname)
         _process_const_section_for_vtables(ea, metaclass_info, found_vtable)
@@ -295,7 +468,7 @@ def _collect_vtables(metaclass_info):
 
 def _check_filetype(filetype):
     """Checks that the filetype is compatible before trying to process it."""
-    return 'Mach-O' in filetype and 'ARM64' in filetype
+    return 'Mach-O' in filetype and 'ARM' in filetype
 
 def collect_class_info_internal():
     """Collect information about C++ classes defined in a kernelcache.
